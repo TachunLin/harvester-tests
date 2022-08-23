@@ -63,6 +63,10 @@ import tempfile
 import time
 import uuid
 import yaml
+import re
+
+UNITS = [&#39;&#39;, &#39;K&#39;, &#39;M&#39;, &#39;G&#39;, &#39;T&#39;, &#39;P&#39;, &#39;E&#39;, &#39;Z&#39;, &#39;Y&#39;]
+FRACTIONAL = [&#39;&#39;, &#39;m&#39;, &#39;u&#39;, &#39;n&#39;, &#39;p&#39;, &#39;f&#39;, &#39;a&#39;, &#39;z&#39;, &#39;y&#39;]
 
 
 def retry_session():
@@ -89,6 +93,64 @@ def retry_session():
 def random_name():
     &#34;&#34;&#34;Generate a random alphanumeric name using uuid.uuid4()&#34;&#34;&#34;
     return uuid.uuid4().hex
+
+
+def remove_ansicode(string):
+    return re.sub(r&#34;\x1b|\[\d+m&#34;, &#34;&#34;, string)
+
+
+def format_unit(value, *, increment=1000, start_exp=0, min_exp=0, max_exp=99,
+                max_precision=2):
+    # type: (int, int, int, int, int, int) -&gt; str
+    # https://github.com/harvester/dashboard/blob/master/shell/utils/units.js#L4
+
+    val, exp, divide = value, start_exp, max_exp &gt;= 0
+
+    if divide:
+        while exp &lt; min_exp or (val &gt;= increment and exp + 1 &lt; len(UNITS)
+                                and exp &lt; max_exp):
+            val = val / increment
+            exp += 1
+    else:
+        while exp &lt; (min_exp * -1) or (val &lt; increment and exp + 1 &lt; len(FRACTIONAL)
+                                       and exp &lt; (max_exp * -1)):
+            val = val * increment
+            exp += 1
+
+    if val &lt; 10 and max_precision &gt;= 1:
+        rv = f&#34;{round(val * (10 ** max_precision) / (10 ** max_precision))}&#34;
+    else:
+        rv = f&#34;{round(val)}&#34;
+
+    return rv
+
+
+def parse_unit(value):
+    # https://github.com/harvester/dashboard/blob/master/shell/utils/units.js#L83
+    try:
+        pattern = r&#34;^([0-9.-]+)\s*([^0-9.-]?)([^0-9.-]?)&#34;
+        val, unit, inc = re.match(pattern, value).groups()
+        val = float(val)
+        assert unit != &#34;&#34;
+    except AttributeError:
+        raise ValueError(&#34;Could not parse the value&#34;, value)
+    except (AssertionError, ValueError):
+        return val
+
+    # µ (mu) symbol -&gt; u
+    unit = &#39;u&#39; if ord(unit[0]) == 181 else unit
+
+    divide = unit in FRACTIONAL
+    multiply = unit.upper() in UNITS
+    inc_base = 1024 if inc == &#39;i&#39; and (divide or multiply) else 1000
+
+    if divide:
+        exp = FRACTIONAL.index(unit)
+        return val / (inc_base ** exp)
+
+    if multiply:
+        exp = UNITS.index(unit.upper())
+        return val * (inc_base ** exp)
 
 
 def random_alphanumeric(length=5, upper_case=False):
@@ -211,23 +273,17 @@ def lookup_hosts_with_most_available_cpu(admin_session,
     most_available_cpu_nodes = None
     most_available_cpu = 0
     for node in nodes_json:
-        # look up CPU usage for the given node
-        resp = admin_session.get(harvester_api_endpoints.get_node_metrics % (
-            node[&#39;metadata&#39;][&#39;name&#39;]))
-        assert resp.status_code == 200, (
-            &#39;Failed to lookup metrices for node %s: %s&#39; % (
-                node[&#39;metadata&#39;][&#39;name&#39;], resp.content))
-        metrics_json = resp.json()
-        # NOTE: Kubernets CPU metrics are expressed in nanocores, or
-        # 1 billionth of a CPU. We need to convert it to a whole CPU core.
-        cpu_usage = math.ceil(
-            int(metrics_json[&#39;usage&#39;][&#39;cpu&#39;][:-1]) / 1000000000)
-        available_cpu = int(node[&#39;status&#39;][&#39;allocatable&#39;][&#39;cpu&#39;]) - cpu_usage
+        node_name = node[&#39;metadata&#39;][&#39;name&#39;]
+        r = node[&#39;metadata&#39;][&#39;annotations&#39;][&#34;management.cattle.io/pod-requests&#34;]
+        reserved = {k: parse_unit(v) for k, v in json.loads(r).items()
+                    if k in (&#39;cpu&#39;, &#39;memory&#39;)}
+
+        available_cpu = int(node[&#39;status&#39;][&#39;allocatable&#39;][&#39;cpu&#39;]) - math.ceil(reserved[&#39;cpu&#39;])
         if available_cpu &gt; most_available_cpu:
             most_available_cpu = available_cpu
-            most_available_cpu_nodes = [node[&#39;metadata&#39;][&#39;name&#39;]]
+            most_available_cpu_nodes = [node_name]
         elif available_cpu == most_available_cpu:
-            most_available_cpu_nodes.append(node[&#39;metadata&#39;][&#39;name&#39;])
+            most_available_cpu_nodes.append(node_name)
     return (most_available_cpu_nodes, most_available_cpu)
 
 
@@ -238,28 +294,24 @@ def lookup_hosts_with_most_available_memory(admin_session,
     nodes_json = resp.json()[&#39;data&#39;]
     most_available_memory_nodes = None
     most_available_memory = 0
+    exp = 3
     for node in nodes_json:
-        # look up CPU usage for the given node
-        resp = admin_session.get(harvester_api_endpoints.get_node_metrics % (
-            node[&#39;metadata&#39;][&#39;name&#39;]))
-        assert resp.status_code == 200, (
-            &#39;Failed to lookup metrices for node %s: %s&#39; % (
-                node[&#39;metadata&#39;][&#39;name&#39;], resp.content))
-        metrics_json = resp.json()
-        # NOTE: Kubernets memory metrics are expressed Kibibyte so convert it
-        # back to Gigabytes
-        memory_usage = math.ceil(
-            int(metrics_json[&#39;usage&#39;][&#39;memory&#39;][:-2]) * 1.024e-06)
+        node_name = node[&#39;metadata&#39;][&#39;name&#39;]
+        r = node[&#39;metadata&#39;][&#39;annotations&#39;][&#34;management.cattle.io/pod-requests&#34;]
+        reserved = {k: parse_unit(v) for k, v in json.loads(r).items()
+                    if k in (&#39;cpu&#39;, &#39;memory&#39;)}
+
         # NOTE: we want the floor here so we don&#39;t over commit
-        allocatable_memory = int(node[&#39;status&#39;][&#39;allocatable&#39;][&#39;memory&#39;][:-2])
-        allocatable_memory = math.floor(
-            allocatable_memory * 1.024e-06)
-        available_memory = allocatable_memory - memory_usage
+        max_memory = parse_unit(node[&#39;status&#39;][&#39;allocatable&#39;][&#39;memory&#39;]) * 0.99
+        available_memory = math.floor(float(format_unit(max_memory - reserved[&#39;memory&#39;],
+                                                        increment=1024, min_exp=exp)))
+
         if available_memory &gt; most_available_memory:
             most_available_memory = available_memory
-            most_available_memory_nodes = [node[&#39;metadata&#39;][&#39;name&#39;]]
+            most_available_memory_nodes = [node_name]
         elif available_memory == most_available_memory:
-            most_available_memory_nodes.append(node[&#39;metadata&#39;][&#39;name&#39;])
+            most_available_memory_nodes.append(node_name)
+
     return (most_available_memory_nodes, most_available_memory)
 
 
@@ -337,24 +389,29 @@ def assert_vm_restarted(admin_session, harvester_api_endpoints,
                         previous_uid, vm_name, wait_timeout):
     # give it some time for the VM instance to restart
     time.sleep(180)
+    resp_json = dict()
 
     def _check_vm_instance_restarted():
         resp = admin_session.get(
             harvester_api_endpoints.get_vm_instance % (vm_name))
         if resp.status_code == 200:
+            nonlocal resp_json
             resp_json = resp.json()
-            if (&#39;status&#39; in resp_json and
-                    &#39;phase&#39; in resp_json[&#39;status&#39;] and
-                    resp_json[&#39;status&#39;][&#39;phase&#39;] == &#39;Running&#39; and
-                    resp_json[&#39;metadata&#39;][&#39;uid&#39;] != previous_uid):
+            if (resp_json.get(&#39;status&#39;, {}).get(&#39;phase&#39;) == &#34;Running&#34;
+                    and resp_json[&#39;metadata&#39;][&#39;uid&#39;] != previous_uid):
                 return True
         return False
 
-    success = polling2.poll(
-        _check_vm_instance_restarted,
-        step=5,
-        timeout=wait_timeout)
-    assert success, &#39;Failed to restart VM %s&#39; % (vm_name)
+    try:
+        polling2.poll(
+            _check_vm_instance_restarted,
+            step=5,
+            timeout=wait_timeout)
+    except polling2.TimeoutException:
+        raise AssertionError(f&#39;Failed to restart VM {vm_name}\n&#39;
+                             f&#34;previous uid: {previous_uid}, &#34;
+                             f&#34;current uid: {resp_json[&#39;metadata&#39;][&#39;uid&#39;]}\n&#34;
+                             f&#34;VM&#39;s Phase: {resp_json.get(&#39;status&#39;, {}).get(&#39;phase&#39;)}&#34;)
 
 
 def delete_image(request, admin_session, harvester_api_endpoints, image_json):
@@ -561,6 +618,8 @@ def create_vm(request, admin_session, image, harvester_api_endpoints,
         machine_type=machine_type,
         include_usb=include_usb
     )
+
+    request_json[&#39;spec&#39;][&#39;runStrategy&#39;] = &#34;RerunOnFailure&#34; if running else &#34;Halted&#34;
 
     resp = admin_session.post(harvester_api_endpoints.create_vm,
                               json=request_json)
@@ -965,6 +1024,9 @@ def create_image_terraform(request, admin_session, harvester_api_endpoints,
         request, &#39;terraform.sh&#39;, &#39;terraform&#39;)
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -1013,6 +1075,9 @@ def destroy_resource(request, admin_session, destroy_type=None):
             request, &#39;terraform_destroy.sh&#39;, &#39;terraform&#39;) + &#39; &#39; + destroy_type
         result = subprocess.run([terraform_script], shell=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result.stdout = remove_ansicode(result.stdout.decode())
+        result.stderr = remove_ansicode(result.stderr.decode())
+
         assert result.returncode == 0, (
             &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
                 result.returncode, result.stderr, result.stdout))
@@ -1045,6 +1110,9 @@ def create_volume_terraform(request, admin_session, harvester_api_endpoints,
         request, &#39;terraform.sh&#39;, &#39;terraform&#39;)
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -1078,6 +1146,9 @@ def create_keypair_terraform(request, admin_session, harvester_api_endpoints,
         request, &#39;terraform.sh&#39;, &#39;terraform&#39;)
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -1120,6 +1191,9 @@ def create_network_terraform(request, admin_session, harvester_api_endpoints,
 
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -1156,6 +1230,9 @@ def create_clusternetworks_terraform(request, admin_session,
         request, &#39;terraform.sh&#39;, &#39;terraform&#39;) + &#39; &#39; + &#39;cluster&#39;
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -1200,6 +1277,9 @@ def create_vm_terraform(request, admin_session, harvester_api_endpoints,
         request, &#39;terraform.sh&#39;, &#39;terraform&#39;)
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -1649,24 +1729,29 @@ def execute_script_on_vm(ip, timeout, script, keypair=None,
                         previous_uid, vm_name, wait_timeout):
     # give it some time for the VM instance to restart
     time.sleep(180)
+    resp_json = dict()
 
     def _check_vm_instance_restarted():
         resp = admin_session.get(
             harvester_api_endpoints.get_vm_instance % (vm_name))
         if resp.status_code == 200:
+            nonlocal resp_json
             resp_json = resp.json()
-            if (&#39;status&#39; in resp_json and
-                    &#39;phase&#39; in resp_json[&#39;status&#39;] and
-                    resp_json[&#39;status&#39;][&#39;phase&#39;] == &#39;Running&#39; and
-                    resp_json[&#39;metadata&#39;][&#39;uid&#39;] != previous_uid):
+            if (resp_json.get(&#39;status&#39;, {}).get(&#39;phase&#39;) == &#34;Running&#34;
+                    and resp_json[&#39;metadata&#39;][&#39;uid&#39;] != previous_uid):
                 return True
         return False
 
-    success = polling2.poll(
-        _check_vm_instance_restarted,
-        step=5,
-        timeout=wait_timeout)
-    assert success, &#39;Failed to restart VM %s&#39; % (vm_name)</code></pre>
+    try:
+        polling2.poll(
+            _check_vm_instance_restarted,
+            step=5,
+            timeout=wait_timeout)
+    except polling2.TimeoutException:
+        raise AssertionError(f&#39;Failed to restart VM {vm_name}\n&#39;
+                             f&#34;previous uid: {previous_uid}, &#34;
+                             f&#34;current uid: {resp_json[&#39;metadata&#39;][&#39;uid&#39;]}\n&#34;
+                             f&#34;VM&#39;s Phase: {resp_json.get(&#39;status&#39;, {}).get(&#39;phase&#39;)}&#34;)</code></pre>
 </details>
 </dd>
 <dt id="harvester_e2e_tests.utils.assert_vm_unschedulable"><code class="name flex">
@@ -1735,6 +1820,9 @@ def execute_script_on_vm(ip, timeout, script, keypair=None,
         request, &#39;terraform.sh&#39;, &#39;terraform&#39;) + &#39; &#39; + &#39;cluster&#39;
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -1826,6 +1914,9 @@ def execute_script_on_vm(ip, timeout, script, keypair=None,
         request, &#39;terraform.sh&#39;, &#39;terraform&#39;)
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -1963,6 +2054,9 @@ def execute_script_on_vm(ip, timeout, script, keypair=None,
         request, &#39;terraform.sh&#39;, &#39;terraform&#39;)
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -2048,6 +2142,9 @@ def execute_script_on_vm(ip, timeout, script, keypair=None,
 
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -2130,6 +2227,8 @@ def execute_script_on_vm(ip, timeout, script, keypair=None,
         machine_type=machine_type,
         include_usb=include_usb
     )
+
+    request_json[&#39;spec&#39;][&#39;runStrategy&#39;] = &#34;RerunOnFailure&#34; if running else &#34;Halted&#34;
 
     resp = admin_session.post(harvester_api_endpoints.create_vm,
                               json=request_json)
@@ -2251,6 +2350,9 @@ def execute_script_on_vm(ip, timeout, script, keypair=None,
         request, &#39;terraform.sh&#39;, &#39;terraform&#39;)
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -2296,6 +2398,9 @@ def execute_script_on_vm(ip, timeout, script, keypair=None,
         request, &#39;terraform.sh&#39;, &#39;terraform&#39;)
     result = subprocess.run([terraform_script], shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result.stdout = remove_ansicode(result.stdout.decode())
+    result.stderr = remove_ansicode(result.stderr.decode())
+
     assert result.returncode == 0, (
         &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
             result.returncode, result.stderr, result.stdout))
@@ -2579,6 +2684,9 @@ def execute_script_on_vm(ip, timeout, script, keypair=None,
             request, &#39;terraform_destroy.sh&#39;, &#39;terraform&#39;) + &#39; &#39; + destroy_type
         result = subprocess.run([terraform_script], shell=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result.stdout = remove_ansicode(result.stdout.decode())
+        result.stderr = remove_ansicode(result.stderr.decode())
+
         assert result.returncode == 0, (
             &#39;Failed to run terraform : rc: %s, stdout: %s, stderr: %s&#39; % (
                 result.returncode, result.stderr, result.stdout))
@@ -2685,6 +2793,41 @@ def execute_script_on_vm(ip, timeout, script, keypair=None,
     assert not errors, (
         &#39;Failed to execute %s on %s: %s&#39; % (script, ip, errors))
     return stdout.read().strip().decode(&#39;utf-8&#39;)</code></pre>
+</details>
+</dd>
+<dt id="harvester_e2e_tests.utils.format_unit"><code class="name flex">
+<span>def <span class="ident">format_unit</span></span>(<span>value, *, increment=1000, start_exp=0, min_exp=0, max_exp=99, max_precision=2)</span>
+</code></dt>
+<dd>
+<div class="desc"></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def format_unit(value, *, increment=1000, start_exp=0, min_exp=0, max_exp=99,
+                max_precision=2):
+    # type: (int, int, int, int, int, int) -&gt; str
+    # https://github.com/harvester/dashboard/blob/master/shell/utils/units.js#L4
+
+    val, exp, divide = value, start_exp, max_exp &gt;= 0
+
+    if divide:
+        while exp &lt; min_exp or (val &gt;= increment and exp + 1 &lt; len(UNITS)
+                                and exp &lt; max_exp):
+            val = val / increment
+            exp += 1
+    else:
+        while exp &lt; (min_exp * -1) or (val &lt; increment and exp + 1 &lt; len(FRACTIONAL)
+                                       and exp &lt; (max_exp * -1)):
+            val = val * increment
+            exp += 1
+
+    if val &lt; 10 and max_precision &gt;= 1:
+        rv = f&#34;{round(val * (10 ** max_precision) / (10 ** max_precision))}&#34;
+    else:
+        rv = f&#34;{round(val)}&#34;
+
+    return rv</code></pre>
 </details>
 </dd>
 <dt id="harvester_e2e_tests.utils.get_backup_create_files_script"><code class="name flex">
@@ -2943,23 +3086,17 @@ Jinja2 template</p></div>
     most_available_cpu_nodes = None
     most_available_cpu = 0
     for node in nodes_json:
-        # look up CPU usage for the given node
-        resp = admin_session.get(harvester_api_endpoints.get_node_metrics % (
-            node[&#39;metadata&#39;][&#39;name&#39;]))
-        assert resp.status_code == 200, (
-            &#39;Failed to lookup metrices for node %s: %s&#39; % (
-                node[&#39;metadata&#39;][&#39;name&#39;], resp.content))
-        metrics_json = resp.json()
-        # NOTE: Kubernets CPU metrics are expressed in nanocores, or
-        # 1 billionth of a CPU. We need to convert it to a whole CPU core.
-        cpu_usage = math.ceil(
-            int(metrics_json[&#39;usage&#39;][&#39;cpu&#39;][:-1]) / 1000000000)
-        available_cpu = int(node[&#39;status&#39;][&#39;allocatable&#39;][&#39;cpu&#39;]) - cpu_usage
+        node_name = node[&#39;metadata&#39;][&#39;name&#39;]
+        r = node[&#39;metadata&#39;][&#39;annotations&#39;][&#34;management.cattle.io/pod-requests&#34;]
+        reserved = {k: parse_unit(v) for k, v in json.loads(r).items()
+                    if k in (&#39;cpu&#39;, &#39;memory&#39;)}
+
+        available_cpu = int(node[&#39;status&#39;][&#39;allocatable&#39;][&#39;cpu&#39;]) - math.ceil(reserved[&#39;cpu&#39;])
         if available_cpu &gt; most_available_cpu:
             most_available_cpu = available_cpu
-            most_available_cpu_nodes = [node[&#39;metadata&#39;][&#39;name&#39;]]
+            most_available_cpu_nodes = [node_name]
         elif available_cpu == most_available_cpu:
-            most_available_cpu_nodes.append(node[&#39;metadata&#39;][&#39;name&#39;])
+            most_available_cpu_nodes.append(node_name)
     return (most_available_cpu_nodes, most_available_cpu)</code></pre>
 </details>
 </dd>
@@ -2979,28 +3116,24 @@ Jinja2 template</p></div>
     nodes_json = resp.json()[&#39;data&#39;]
     most_available_memory_nodes = None
     most_available_memory = 0
+    exp = 3
     for node in nodes_json:
-        # look up CPU usage for the given node
-        resp = admin_session.get(harvester_api_endpoints.get_node_metrics % (
-            node[&#39;metadata&#39;][&#39;name&#39;]))
-        assert resp.status_code == 200, (
-            &#39;Failed to lookup metrices for node %s: %s&#39; % (
-                node[&#39;metadata&#39;][&#39;name&#39;], resp.content))
-        metrics_json = resp.json()
-        # NOTE: Kubernets memory metrics are expressed Kibibyte so convert it
-        # back to Gigabytes
-        memory_usage = math.ceil(
-            int(metrics_json[&#39;usage&#39;][&#39;memory&#39;][:-2]) * 1.024e-06)
+        node_name = node[&#39;metadata&#39;][&#39;name&#39;]
+        r = node[&#39;metadata&#39;][&#39;annotations&#39;][&#34;management.cattle.io/pod-requests&#34;]
+        reserved = {k: parse_unit(v) for k, v in json.loads(r).items()
+                    if k in (&#39;cpu&#39;, &#39;memory&#39;)}
+
         # NOTE: we want the floor here so we don&#39;t over commit
-        allocatable_memory = int(node[&#39;status&#39;][&#39;allocatable&#39;][&#39;memory&#39;][:-2])
-        allocatable_memory = math.floor(
-            allocatable_memory * 1.024e-06)
-        available_memory = allocatable_memory - memory_usage
+        max_memory = parse_unit(node[&#39;status&#39;][&#39;allocatable&#39;][&#39;memory&#39;]) * 0.99
+        available_memory = math.floor(float(format_unit(max_memory - reserved[&#39;memory&#39;],
+                                                        increment=1024, min_exp=exp)))
+
         if available_memory &gt; most_available_memory:
             most_available_memory = available_memory
-            most_available_memory_nodes = [node[&#39;metadata&#39;][&#39;name&#39;]]
+            most_available_memory_nodes = [node_name]
         elif available_memory == most_available_memory:
-            most_available_memory_nodes.append(node[&#39;metadata&#39;][&#39;name&#39;])
+            most_available_memory_nodes.append(node_name)
+
     return (most_available_memory_nodes, most_available_memory)</code></pre>
 </details>
 </dd>
@@ -3021,6 +3154,43 @@ Jinja2 template</p></div>
     assert resp.status_code == 200, &#39;Failed to lookup VM instance %s: %s&#39; % (
         vm_json[&#39;metadata&#39;][&#39;name&#39;], resp.content)
     return resp.json()</code></pre>
+</details>
+</dd>
+<dt id="harvester_e2e_tests.utils.parse_unit"><code class="name flex">
+<span>def <span class="ident">parse_unit</span></span>(<span>value)</span>
+</code></dt>
+<dd>
+<div class="desc"></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def parse_unit(value):
+    # https://github.com/harvester/dashboard/blob/master/shell/utils/units.js#L83
+    try:
+        pattern = r&#34;^([0-9.-]+)\s*([^0-9.-]?)([^0-9.-]?)&#34;
+        val, unit, inc = re.match(pattern, value).groups()
+        val = float(val)
+        assert unit != &#34;&#34;
+    except AttributeError:
+        raise ValueError(&#34;Could not parse the value&#34;, value)
+    except (AssertionError, ValueError):
+        return val
+
+    # µ (mu) symbol -&gt; u
+    unit = &#39;u&#39; if ord(unit[0]) == 181 else unit
+
+    divide = unit in FRACTIONAL
+    multiply = unit.upper() in UNITS
+    inc_base = 1024 if inc == &#39;i&#39; and (divide or multiply) else 1000
+
+    if divide:
+        exp = FRACTIONAL.index(unit)
+        return val / (inc_base ** exp)
+
+    if multiply:
+        exp = UNITS.index(unit.upper())
+        return val * (inc_base ** exp)</code></pre>
 </details>
 </dd>
 <dt id="harvester_e2e_tests.utils.poll_for_resource_ready"><code class="name flex">
@@ -3293,6 +3463,19 @@ Jinja2 template</p></div>
     assert success, &#39;Timed out while waiting for node to reboot&#39;</code></pre>
 </details>
 </dd>
+<dt id="harvester_e2e_tests.utils.remove_ansicode"><code class="name flex">
+<span>def <span class="ident">remove_ansicode</span></span>(<span>string)</span>
+</code></dt>
+<dd>
+<div class="desc"></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def remove_ansicode(string):
+    return re.sub(r&#34;\x1b|\[\d+m&#34;, &#34;&#34;, string)</code></pre>
+</details>
+</dd>
 <dt id="harvester_e2e_tests.utils.restart_vm"><code class="name flex">
 <span>def <span class="ident">restart_vm</span></span>(<span>admin_session, harvester_api_endpoints, previous_uid, vm_name, wait_timeout)</span>
 </code></dt>
@@ -3512,6 +3695,7 @@ Jinja2 template</p></div>
 <li><code><a title="harvester_e2e_tests.utils.disable_maintenance_mode" href="#harvester_e2e_tests.utils.disable_maintenance_mode">disable_maintenance_mode</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.enable_maintenance_mode" href="#harvester_e2e_tests.utils.enable_maintenance_mode">enable_maintenance_mode</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.execute_script_on_vm" href="#harvester_e2e_tests.utils.execute_script_on_vm">execute_script_on_vm</a></code></li>
+<li><code><a title="harvester_e2e_tests.utils.format_unit" href="#harvester_e2e_tests.utils.format_unit">format_unit</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.get_backup_create_files_script" href="#harvester_e2e_tests.utils.get_backup_create_files_script">get_backup_create_files_script</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.get_json_object_from_template" href="#harvester_e2e_tests.utils.get_json_object_from_template">get_json_object_from_template</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.get_latest_resource_version" href="#harvester_e2e_tests.utils.get_latest_resource_version">get_latest_resource_version</a></code></li>
@@ -3524,6 +3708,7 @@ Jinja2 template</p></div>
 <li><code><a title="harvester_e2e_tests.utils.lookup_hosts_with_most_available_cpu" href="#harvester_e2e_tests.utils.lookup_hosts_with_most_available_cpu">lookup_hosts_with_most_available_cpu</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.lookup_hosts_with_most_available_memory" href="#harvester_e2e_tests.utils.lookup_hosts_with_most_available_memory">lookup_hosts_with_most_available_memory</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.lookup_vm_instance" href="#harvester_e2e_tests.utils.lookup_vm_instance">lookup_vm_instance</a></code></li>
+<li><code><a title="harvester_e2e_tests.utils.parse_unit" href="#harvester_e2e_tests.utils.parse_unit">parse_unit</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.poll_for_resource_ready" href="#harvester_e2e_tests.utils.poll_for_resource_ready">poll_for_resource_ready</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.poll_for_update_resource" href="#harvester_e2e_tests.utils.poll_for_update_resource">poll_for_update_resource</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.power_off_node" href="#harvester_e2e_tests.utils.power_off_node">power_off_node</a></code></li>
@@ -3532,6 +3717,7 @@ Jinja2 template</p></div>
 <li><code><a title="harvester_e2e_tests.utils.random_alphanumeric" href="#harvester_e2e_tests.utils.random_alphanumeric">random_alphanumeric</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.random_name" href="#harvester_e2e_tests.utils.random_name">random_name</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.reboot_node" href="#harvester_e2e_tests.utils.reboot_node">reboot_node</a></code></li>
+<li><code><a title="harvester_e2e_tests.utils.remove_ansicode" href="#harvester_e2e_tests.utils.remove_ansicode">remove_ansicode</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.restart_vm" href="#harvester_e2e_tests.utils.restart_vm">restart_vm</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.restore_vm_backup" href="#harvester_e2e_tests.utils.restore_vm_backup">restore_vm_backup</a></code></li>
 <li><code><a title="harvester_e2e_tests.utils.retry_session" href="#harvester_e2e_tests.utils.retry_session">retry_session</a></code></li>
