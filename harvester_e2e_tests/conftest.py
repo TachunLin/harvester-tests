@@ -95,6 +95,12 @@ def pytest_addoption(parser):
         help='Physical NIC for VLAN. Default is "eth0"'
     )
     parser.addoption(
+        '--vlan-cidr',
+        action='store',
+        default=config_data['vlan-cidr'],
+        help='VLAN CIDR, indicate the vlan network subnet range"'
+    )
+    parser.addoption(
         '--wait-timeout',
         action='store',
         type=int,
