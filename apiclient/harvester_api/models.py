@@ -297,6 +297,8 @@ class VMSpec:
 
     def delete_vlan_network(self, vm_spec, net_uid):
         for index, value in enumerate(vm_spec.networks):
+            if "multus" not in value["network"]:
+                continue
             if value["network"]["multus"]["networkName"] == net_uid:
                 vm_spec.networks.pop(index)
                 return vm_spec

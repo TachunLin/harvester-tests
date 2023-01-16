@@ -44,8 +44,8 @@ def vlan_network(request, api_client):
     yield data
 
     api_client.networks.delete(network_name)
-    # api_client.clusternetworks.delete_config(vlan_nic)
-    # api_client.clusternetworks.create(vlan_nic)
+    api_client.clusternetworks.delete_config(vlan_nic)
+    api_client.clusternetworks.delete(vlan_nic)
 
 
 @pytest.fixture(scope='class')
@@ -78,11 +78,15 @@ class TestBackendNetwork:
 
         # self.create_image_url(api_client, 'opensuse', qcow2_image_url, wait_timeout)
 
-        tcp_foward = "sudo sed -i 's/AllowTcpForwarding no/AllowTcpForwarding yes/g'"
-        restart_ssh = "/etc/ssh/sshd_config;sudo systemctl restart sshd.service"
-        open_tcp_forward_command = tcp_foward + restart_ssh
+        # Update AllowTcpForwarding for ssh jumpstart
+        tcp = "sudo sed -i 's/AllowTcpForwarding no/AllowTcpForwarding yes/g' /etc/ssh/sshd_config"
+        restart_ssh = "sudo systemctl restart sshd.service"
+
         self.ssh_client(client, client_ip, "rancher", "p@ssword",
-                        open_tcp_forward_command, wait_timeout)
+                        tcp, wait_timeout)
+
+        self.ssh_client(client, client_ip, "rancher", "p@ssword",
+                        restart_ssh, wait_timeout)
 
         spec = api_client.vms.Spec(1, 2)
         spec.user_data += "password: 123456\nchpasswd: { expire: False }\nssh_pwauth: True"
@@ -248,7 +252,7 @@ class TestBackendNetwork:
             sleep(5)
         else:
             raise AssertionError(
-                f"Failed to delete VM {unique_name} in Running status, exceed 10 minutes\n"
+                f"Failed to delete VM {unique_name}, exceed 10 minutes\n"
                 f"Still got {code} with {data}"
             )
 
@@ -415,7 +419,7 @@ class TestBackendNetwork:
             sleep(5)
         else:
             raise AssertionError(
-                f"Failed to delete VM {unique_name} in Running status, exceed 10 minutes\n"
+                f"Failed to delete VM {unique_name}, exceed 10 minutes\n"
                 f"Still got {code} with {data}"
             )
 
@@ -574,14 +578,16 @@ class TestBackendNetwork:
             if 'interfaces' in data['status']:
                 interfaces_data = data['status']['interfaces']
                 ip_addresses = []
-                ip_addresses.append(interfaces_data[0]['ipAddress'])
+                for interface in interfaces_data:
+                    if 'ipAddress' in interface:
+                        ip_addresses.append(interface['ipAddress'])
 
                 if vlan_subnet_prefix in ip_addresses[0]:
                     break
                 sleep(5)
         else:
             raise AssertionError(
-                f"Failed to get VM {unique_name} IP address, exceed 10 minutes timed out\n"
+                f"Failed to get VM {unique_name} IP address, exceed 10 minutes\n"
                 f"Still got {code} with {data}"
             )
 
@@ -602,6 +608,21 @@ class TestBackendNetwork:
 
         assert stdout.find("bin") == 0, (
             'Failed to ssh to VM management IP %s' % (vlan_ip))
+
+        # cleanup vm
+        api_client.vms.delete(unique_name)
+
+        while endtime > datetime.now():
+            code, data = api_client.vms.get(unique_name)
+
+            if code == 404:
+                break
+            sleep(5)
+        else:
+            raise AssertionError(
+                f"Failed to delete VM {unique_name}, exceed 10 minutes\n"
+                f"Still got {code} with {data}"
+            )
 
     @pytest.mark.networks_p1
     @pytest.mark.dependency(name="mgmt_vlan_network_connection")
@@ -626,6 +647,15 @@ class TestBackendNetwork:
         client_ip = request.config.getoption('--endpoint').strip('https://')
 
         # self.create_image_url(api_client, 'opensuse', qcow2_image_url, wait_timeout)
+
+        tcp = "sudo sed -i 's/AllowTcpForwarding no/AllowTcpForwarding yes/g' /etc/ssh/sshd_config"
+        restart_ssh = "sudo systemctl restart sshd.service"
+        # open_tcp_forward_command = tcp_foward + restart_ssh
+        self.ssh_client(client, client_ip, "rancher", "p@ssword",
+                        tcp, wait_timeout)
+
+        self.ssh_client(client, client_ip, "rancher", "p@ssword",
+                        restart_ssh, wait_timeout)
 
         spec = api_client.vms.Spec(1, 2, mgmt_network=False)
         spec.user_data += "password: 123456\nchpasswd: { expire: False }\nssh_pwauth: True"
@@ -748,8 +778,6 @@ class TestBackendNetwork:
         assert stdout.find("64 bytes from {0}".format(mgmt_ip)) > 0, (
             'Failed to ping VM management IP %s' % (mgmt_ip))
 
-        sleep(30)
-
         # SSH to management ip address and execute command
         _stdout, _stderr = self.ssh_jumpstart(
             client, mgmt_ip, client_ip, "rancher", "p@ssword", "opensuse", "123456", "ls")
@@ -758,6 +786,227 @@ class TestBackendNetwork:
 
         assert stdout.find("bin") == 0, (
             'Failed to ssh to VM management IP %s' % (mgmt_ip))
+
+        # cleanup vm
+        api_client.vms.delete(unique_name)
+
+        while endtime > datetime.now():
+            code, data = api_client.vms.get(unique_name)
+
+            if code == 404:
+                break
+            sleep(5)
+        else:
+            raise AssertionError(
+                f"Failed to delete VM {unique_name}, exceed 10 minutes\n"
+                f"Still got {code} with {data}"
+            )
+
+    @pytest.mark.networks_p1
+    @pytest.mark.dependency(name="mgmt_vlan_network_connection")
+    def test_delete_vlan_from_multiple(self, api_client, request, client, unique_name,
+                                       qcow2_image_url, vlan_network):
+        """
+        Manual test plan reference:
+        https://harvester.github.io/tests/manual/network/delete-vlan-network-form/
+
+        Steps:
+        1. Create an external VLAN network
+        2. Create a new VM
+        3. Make sure that the network is set to the management network with masquerade as the type
+        4. Add another external VLAN management
+        5. Wait until the VM boot in running state
+        6. Delete the external VLAN from VM
+        7. Validate interface was removed with ip link status
+        8. Check can ping the VM on the management network
+        """
+
+        wait_timeout = request.config.getoption('--wait-timeout')
+        client_ip = request.config.getoption('--endpoint').strip('https://')
+
+        # self.create_image_url(api_client, 'opensuse', qcow2_image_url, wait_timeout)
+
+        spec = api_client.vms.Spec(1, 2)
+        spec.user_data += "password: 123456\nchpasswd: { expire: False }\nssh_pwauth: True"
+        unique_name = unique_name + "-delete-vlan"
+        # Create VM
+        spec.add_image('opensuse', "default/opensuse")
+
+        code, data = api_client.vms.create(unique_name, spec)
+        assert 201 == code, (f"Failed to create vm with error: {code}, {data}")
+
+        # Check VM start in running state
+        endtime = datetime.now() + timedelta(seconds=wait_timeout)
+
+        while endtime > datetime.now():
+            code, data = api_client.vms.get(unique_name)
+            vm_fields = data['metadata']['fields']
+
+            assert 200 == code, (code, data)
+            if vm_fields[2] == 'Running':
+                break
+            sleep(5)
+        else:
+            raise AssertionError(
+                f"Failed to create VM {unique_name} in Running status, exceed 10 minutes\n"
+                f"Still got {code} with {data}"
+            )
+
+        # Check until VM ip address exists
+        endtime = datetime.now() + timedelta(seconds=wait_timeout)
+
+        while endtime > datetime.now():
+            code, data = api_client.vms.vm_instance(unique_name)
+            if 'ipAddress' in data['status']['interfaces'][0]:
+                break
+            sleep(5)
+        else:
+            raise AssertionError(
+                f"Failed to get VM {unique_name} IP address, exceed 10 minutes timed out\n"
+                f"Still got {code} with {data}"
+            )
+
+        # Get VM interface ipAddresses
+        # code, data = api_client.vms.vm_instance(unique_name)
+        # interfaces_data = data['status']['interfaces']
+        # for interface in interfaces_data:
+        #     ip_addresses = interface['ipAddresses']
+
+        # # Ping management ip address
+        # mgmt_ip = ip_addresses[0]
+
+        # get data from running VM and transfer to spec
+        code, data = api_client.vms.get(unique_name)
+        spec = spec.from_dict(data)
+
+        # Switch to vlan network
+        # spec.mgmt_network = False
+        spec.add_network("nic-1", "default/" + vlan_network['id'])
+
+        # Update VM spec
+        code, data = api_client.vms.update(unique_name, spec)
+
+        code, data = api_client.vms.restart(unique_name)
+
+        # Check VM start in running state
+        endtime = datetime.now() + timedelta(seconds=wait_timeout)
+
+        while endtime > datetime.now():
+            code, data = api_client.vms.get(unique_name)
+            vm_fields = data['metadata']['fields']
+
+            assert 200 == code, (code, data)
+            if vm_fields[2] == 'Running':
+                break
+            sleep(5)
+        else:
+            raise AssertionError(
+                f"Failed to create VM {unique_name} in Running status, exceed 10 minutes\n"
+                f"Still got {code} with {data}"
+            )
+
+        # # Check until VM ip address exists
+        endtime = datetime.now() + timedelta(seconds=wait_timeout)
+
+        while endtime > datetime.now():
+            code, data = api_client.vms.vm_instance(unique_name)
+            if 'ipAddress' in data['status']['interfaces'][0]:
+                break
+            sleep(5)
+        else:
+            raise AssertionError(
+                f"Failed to get VM {unique_name} IP address, exceed 10 minutes timed out\n"
+                f"Still got {code} with {data}"
+            )
+
+        # get data from running VM and transfer to spec
+        code, data = api_client.vms.get(unique_name)
+        spec = spec.from_dict(data)
+
+        # Delete external vlan from VM spec
+        spec.delete_vlan_network(spec, "default/" + vlan_network['id'])
+
+        code, data = api_client.vms.update(unique_name, spec)
+
+        code, data = api_client.vms.restart(unique_name)
+
+        # Check VM start in running state
+        endtime = datetime.now() + timedelta(seconds=wait_timeout)
+
+        while endtime > datetime.now():
+            code, data = api_client.vms.get(unique_name)
+            vm_fields = data['metadata']['fields']
+
+            assert 200 == code, (code, data)
+            if vm_fields[2] == 'Running':
+                break
+            sleep(5)
+        else:
+            raise AssertionError(
+                f"Failed to create VM {unique_name} in Running status, exceed 10 minutes\n"
+                f"Still got {code} with {data}"
+            )
+
+        # # Check until VM ip address exists
+        endtime = datetime.now() + timedelta(seconds=wait_timeout)
+
+        while endtime > datetime.now():
+            code, data = api_client.vms.vm_instance(unique_name)
+            if 'ipAddress' in data['status']['interfaces'][0]:
+                break
+
+            sleep(5)
+        else:
+            raise AssertionError(
+                f"Failed to get VM {unique_name} IP address, exceed 10 minutes timed out\n"
+                f"Still got {code} with {data}"
+            )
+
+        endtime = datetime.now() + timedelta(seconds=wait_timeout)
+        ip_addresses = []
+
+        while endtime > datetime.now():
+            code, data = api_client.vms.vm_instance(unique_name)
+            if 'interfaces' in data['status']:
+                interfaces_data = data['status']['interfaces']
+                ip_addresses = []
+                ip_addresses.append(interfaces_data[0]['ipAddress'])
+
+                if '10.52.0' in ip_addresses[0]:
+                    break
+                sleep(5)
+        else:
+            raise AssertionError(
+                f"Failed to get VM {unique_name} IP address, exceed 10 minutes timed out\n"
+                f"Still got {code} with {data}"
+            )
+
+        # Ping management ip address
+        mgmt_ip = ip_addresses[0]
+        ping_command = "ping -c 50 {0}".format(mgmt_ip)
+
+        _stdout, _stderr = self.ssh_client(
+            client, client_ip, "rancher", "p@ssword", ping_command, wait_timeout)
+
+        stdout = _stdout.read().decode('ascii').strip("\n")
+
+        assert stdout.find("64 bytes from {0}".format(mgmt_ip)) > 0, (
+            'Failed to ping VM management IP %s' % (mgmt_ip))
+
+        # cleanup vm
+        api_client.vms.delete(unique_name)
+
+        while endtime > datetime.now():
+            code, data = api_client.vms.get(unique_name)
+
+            if code == 404:
+                break
+            sleep(5)
+        else:
+            raise AssertionError(
+                f"Failed to delete VM {unique_name}, exceed 10 minutes\n"
+                f"Still got {code} with {data}"
+            )
 
     def ssh_client(self, client, dest_ip, username, password, command, timeout):
         client.connect(dest_ip, username=username, password=password, timeout=timeout)
