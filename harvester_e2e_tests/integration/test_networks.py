@@ -164,7 +164,7 @@ class TestBackendNetwork():
         wait_timeout = request.config.getoption('--wait-timeout')
         client_ip = request.config.getoption('--endpoint').strip('https://')
 
-        create_image_url(api_client, image_name, qcow2_image_url, wait_timeout)
+        # create_image_url(api_client, image_name, qcow2_image_url, wait_timeout)
 
         # Update AllowTcpForwarding for ssh jumpstart
         tcp = "sudo sed -i 's/AllowTcpForwarding no/AllowTcpForwarding yes/g' /etc/ssh/sshd_config"
@@ -224,10 +224,10 @@ class TestBackendNetwork():
         delete_vm(api_client, unique_name, wait_timeout)
 
     @pytest.mark.networks_p1
-    @pytest.mark.dependency(name="mgmt_vlan_network_connection",
-                            depends=["mgmt_network_connection"])
+    # @pytest.mark.dependency(name="mgmt_vlan_network_connection",
+    #                         depends=["mgmt_network_connection"])
     def test_vlan_network_connection(self, api_client, request, client, unique_name,
-                                     qcow2_image_url, vlan_network):
+                                     vlan_network):
         """
         Manual test plan reference:
         https://harvester.github.io/tests/manual/network/validate-network-external-vlan/
@@ -267,9 +267,13 @@ class TestBackendNetwork():
         vlan_ip = ip_addresses[0]
 
         # Ping management ip address
-        command = "ping -c 50 {0}".format(vlan_ip)
+        # command = "ping -c 50 {0}".format(vlan_ip)
 
-        result = subprocess.check_output(command, shell=True, encoding="utf-8")
+        # result = subprocess.check_output(command, shell=True, encoding="utf-8")
+
+        command = ['/usr/bin/ping', '-c', '50', vlan_ip]
+
+        result = subprocess.check_output(command, shell=False, encoding="utf-8")
 
         assert result.find("64 bytes from {0}".format(vlan_ip)) > 0, (
             'Failed to ping VM management IP %s' % (vlan_ip))
@@ -287,8 +291,8 @@ class TestBackendNetwork():
         delete_vm(api_client, unique_name, wait_timeout)
 
     @pytest.mark.networks_p1
-    @pytest.mark.dependency(name="mgmt_vlan_network_connection",
-                            depends=["mgmt_network_connection"])
+    # @pytest.mark.dependency(name="mgmt_vlan_network_connection",
+    #                         depends=["mgmt_network_connection"])
     def test_reboot_vlan_connection(self, api_client, request, client, unique_name,
                                     vlan_network):
         """
@@ -335,9 +339,13 @@ class TestBackendNetwork():
         vlan_ip = ip_addresses[0]
 
         # Ping management ip address
-        command = "ping -c 3 {0}".format(vlan_ip)
+        # command = "ping -c 3 {0}".format(vlan_ip)
 
-        result = subprocess.check_output(command, shell=True, encoding="utf-8")
+        # result = subprocess.check_output(command, shell=True, encoding="utf-8")
+
+        command = ['/usr/bin/ping', '-c', '50', vlan_ip]
+
+        result = subprocess.check_output(command, shell=False, encoding="utf-8")
 
         assert result.find("64 bytes from {0}".format(vlan_ip)) > 0, (
             'Failed to ping VM vlan IP %s' % (vlan_ip))
@@ -362,7 +370,7 @@ class TestBackendNetwork():
             )
 
         try:
-            subprocess.check_output(command, shell=True, encoding="utf-8",
+            subprocess.check_output(command, shell=False, encoding="utf-8",
                                     stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
             assert e.output.find("100% packet loss") > 0, (
@@ -383,16 +391,20 @@ class TestBackendNetwork():
         vlan_ip = ip_addresses[0]
 
         # Ping management ip address
-        command = "ping -c 3 {0}".format(vlan_ip)
+        # command = "ping -c 3 {0}".format(vlan_ip)
 
-        result = subprocess.check_output(command, shell=True, encoding="utf-8")
+        # result = subprocess.check_output(command, shell=True, encoding="utf-8")
+
+        command = ['/usr/bin/ping', '-c', '3', vlan_ip]
+
+        result = subprocess.check_output(command, shell=False, encoding="utf-8")
 
         # cleanup vm
         delete_vm(api_client, unique_name, wait_timeout)
 
     @pytest.mark.networks_p1
-    @pytest.mark.dependency(name="mgmt_vlan_network_connection",
-                            depends=["mgmt_network_connection"])
+    # @pytest.mark.dependency(name="mgmt_vlan_network_connection",
+    #                         depends=["mgmt_network_connection"])
     def test_mgmt_to_vlan_connection(self, api_client, request, client, unique_name,
                                      vlan_network):
         """
@@ -493,9 +505,13 @@ class TestBackendNetwork():
 
         # Ping management ip address
         vlan_ip = ip_addresses[0]
-        command = "ping -c 50 {0}".format(vlan_ip)
+        # command = "ping -c 50 {0}".format(vlan_ip)
 
-        result = subprocess.check_output(command, shell=True, encoding="utf-8")
+        # result = subprocess.check_output(command, shell=True, encoding="utf-8")
+
+        command = ['/usr/bin/ping', '-c', '50', vlan_ip]
+
+        result = subprocess.check_output(command, shell=False, encoding="utf-8")
 
         assert result.find("64 bytes from {0}".format(vlan_ip)) > 0, (
             'Failed to ping VM management IP %s' % (vlan_ip))
