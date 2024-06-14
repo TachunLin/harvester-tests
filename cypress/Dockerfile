@@ -12,7 +12,7 @@ WORKDIR /tests/cypress
 
 COPY . /tests/cypress
 
-RUN yarn install
+RUN yarn install --force
 
 ENV PATH /tests/cypress/node_modules/.bin:$PATH
 
