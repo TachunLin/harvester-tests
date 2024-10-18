@@ -65,14 +65,14 @@ describe('Set backup target S3', () => {
     it.only('Set backup target S3', () => {
         settings.clickMenu('backup-target', 'Edit Setting', 'backup-target');
 
-        const backupTarget = Cypress.env('backupTarget');
+        const backupTarget = Cypress.env('S3backupTarget');
         settings.setS3BackupTarget({
             type: 'S3',
-            endpoint: "http://172.19.99.205:9000",
-            bucketName: "cypress",
-            bucketRegion: "ecmlab",
-            accessKeyId: "minioadmin",
-            secretAccessKey: "minioadmin",
+            endpoint: backupTarget.S3endpoint,
+            bucketName: backupTarget.S3bucketName,
+            bucketRegion: backupTarget.S3bucketRegion,
+            accessKeyId: backupTarget.S3accessKey,
+            secretAccessKey: backupTarget.S3secretKey,
         })
 
         settings.update('backup-target');
