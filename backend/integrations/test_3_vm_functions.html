@@ -903,7 +903,7 @@ def unset_cpu_memory_overcommit(api_client):
 
     yield json.loads(data[&#39;value&#39;]), origin_val
 
-    spec.val = origin_val
+    spec.value = origin_val
     api_client.settings.update(&#39;overcommit-config&#39;, spec)</code></pre>
 </details>
 <div class="desc"></div>
@@ -923,7 +923,6 @@ def unset_cpu_memory_overcommit(api_client):
 </summary>
 <pre><code class="python">@pytest.mark.p0
 @pytest.mark.smoke
-@pytest.mark.wait_volumes_detached
 @pytest.mark.virtualmachines
 class TestHotPlugVolume:
     &#34;&#34;&#34;
@@ -2245,8 +2244,11 @@ class TestVMOperations:
             f&#34;{data}&#34;
         )
 
-        new_host = next(h[&#39;id&#39;] for h in host_data[&#39;data&#39;]
-                        if cur_host != h[&#39;id&#39;] and not h[&#39;spec&#39;].get(&#39;taint&#39;))
+        try:
+            new_host = next(h[&#39;id&#39;] for h in host_data[&#39;data&#39;]
+                            if cur_host != h[&#39;id&#39;] and not h[&#39;spec&#39;].get(&#39;taint&#39;))
+        except StopIteration:
+            pytest.skip(&#34;Require 2+ nodes for migration testing.&#34;)
 
         code, data = api_client.vms.migrate(unique_vm_name, new_host)
         assert 204 == code, (code, data)
@@ -2284,8 +2286,11 @@ class TestVMOperations:
             f&#34;{data}&#34;
         )
 
-        new_host = next(h[&#39;id&#39;] for h in host_data[&#39;data&#39;]
-                        if cur_host != h[&#39;id&#39;] and not h[&#39;spec&#39;].get(&#39;taint&#39;))
+        try:
+            new_host = next(h[&#39;id&#39;] for h in host_data[&#39;data&#39;]
+                            if cur_host != h[&#39;id&#39;] and not h[&#39;spec&#39;].get(&#39;taint&#39;))
+        except StopIteration:
+            pytest.skip(&#34;Require 2+ nodes for migration testing.&#34;)
 
         code, data = api_client.vms.migrate(unique_vm_name, new_host)
         assert 204 == code, (code, data)
@@ -2411,8 +2416,11 @@ class TestVMOperations:
         f&#34;{data}&#34;
     )
 
-    new_host = next(h[&#39;id&#39;] for h in host_data[&#39;data&#39;]
-                    if cur_host != h[&#39;id&#39;] and not h[&#39;spec&#39;].get(&#39;taint&#39;))
+    try:
+        new_host = next(h[&#39;id&#39;] for h in host_data[&#39;data&#39;]
+                        if cur_host != h[&#39;id&#39;] and not h[&#39;spec&#39;].get(&#39;taint&#39;))
+    except StopIteration:
+        pytest.skip(&#34;Require 2+ nodes for migration testing.&#34;)
 
     code, data = api_client.vms.migrate(unique_vm_name, new_host)
     assert 204 == code, (code, data)
@@ -2557,8 +2565,11 @@ Expected Result:<ul>
         f&#34;{data}&#34;
     )
 
-    new_host = next(h[&#39;id&#39;] for h in host_data[&#39;data&#39;]
-                    if cur_host != h[&#39;id&#39;] and not h[&#39;spec&#39;].get(&#39;taint&#39;))
+    try:
+        new_host = next(h[&#39;id&#39;] for h in host_data[&#39;data&#39;]
+                        if cur_host != h[&#39;id&#39;] and not h[&#39;spec&#39;].get(&#39;taint&#39;))
+    except StopIteration:
+        pytest.skip(&#34;Require 2+ nodes for migration testing.&#34;)
 
     code, data = api_client.vms.migrate(unique_vm_name, new_host)
     assert 204 == code, (code, data)
@@ -2998,6 +3009,7 @@ class TestVMResource:
         code, data = api_client.vms.get(unique_vm_name)
         vm_spec = api_client.vms.Spec.from_dict(data)
         vm_spec.cpu_cores, vm_spec.memory = 1, 2
+        sleep(1)  # to prevent update too fast cause code 409 conflict: &#39;object has been modified&#39;
         code, data = api_client.vms.update(unique_vm_name, vm_spec)
         assert 200 == code, (code, data)
 
@@ -3521,6 +3533,7 @@ def test_update_schedule_on_maximum(
     code, data = api_client.vms.get(unique_vm_name)
     vm_spec = api_client.vms.Spec.from_dict(data)
     vm_spec.cpu_cores, vm_spec.memory = 1, 2
+    sleep(1)  # to prevent update too fast cause code 409 conflict: &#39;object has been modified&#39;
     code, data = api_client.vms.update(unique_vm_name, vm_spec)
     assert 200 == code, (code, data)
 
